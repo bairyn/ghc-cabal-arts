@@ -14,8 +14,9 @@
 # 3.4.1.0.
 
 # If you get an rts version error (>=1.0 or 1.1 or whatever), maybe try
-# restarting the build since it non-deterministically gets me sometimes; just
-# too busy at the moment to dig deeper.
+# restarting the build since it has (possibly non-deterministically) bitten me
+# before when I was writing this up
+# (https://gitlab.haskell.org/ghc/ghc/-/issues/22099).
 
 pkgbase=ghc-cabal-arts
 pkgname=ghc-cabal-arts
@@ -34,7 +35,7 @@ conflicts=('ghc' 'cabal-install' 'ghc-libs' 'ghc-static')
 provides=('ghc' 'cabal-install' 'ghc-libs' 'ghc-static')
 source=(
 	https://github.com/bairyn/cabal/archive/0114ec9ac2b3fb68a69b36a9c70482e9c4486366.tar.gz
-	#https://github.com/ghc/ghc/archive/refs/tags/ghc-9.4.2-release.tar.gz  # Probably easier for us to just get the submodules bundled.
+	#https://github.com/ghc/ghc/archive/refs/tags/ghc-9.4.2-release.tar.gz  # Probably easier for us to just get the submodules bundled, so use the next URL instead.
 	https://downloads.haskell.org/~ghc/9.4.2/ghc-9.4.2-src.tar.xz
 )
 sha512sums=(
@@ -214,20 +215,23 @@ package_ghc-cabal-arts() {
 	# /usr/lib/ghc-9.4.2/package.conf.d, probably the default global
 	# package-db, which I was trying to hide.
 	#
-	# So instead, I decided to tae the approach of pulling in a bubblewrap
+	# So instead, I decided to take the approach of pulling in a bubblewrap
 	# build-dependency to hide /usr/lib as a directory that actually has our
-	# overriden $pkgdir package DB.
+	# overriden $pkgdir package DB.  (That is, when cabal is running, it can't
+	# see /usr/lib/ghc-9.0.2 because we've patched it as an empty directory.)
+	#
+	# However, cabal-install itself needs files in /usr/lib/ghc-9.0.2
+	# (run ldd on /usr/bin/cabal) in order to run, so to make cabal runnable
+	# without this directory, we'll copy each .so from this directory and let
+	# cabal know of them for runtime linking via LD_LIBRARY_PATH.
 
 	emptyDir="$(pwd)/empty"
 	origGhcDir="$(pwd)/lib-ghc"
 	install -d -m 0775 -- "${emptyDir}"
 	install -d -m 0775 -- "${origGhcDir}"
-	# This may be used in eval-fashion.
-	# TODO: when cleaning this  up to be more general than just my system, add a condition check for !=ghc-9.4.2 (same version) to hadle it as it should be handled (probably just skip; will be mounting anyway).
-	# FIXME:
-	# > % /usr/bin/bwrap --dev-bind / / --bind /home/bairyn/tmp/emptydir /usr/lib/ghc-9.0.2 --bind /home/bairyn/tmp/dirwithstuff /usr/lib/ghc-9.4.2 bash
-	# > bwrap: Can't mkdir /usr/lib/ghc-9.4.2: Permission denied
-	# TODO: check setuid bwrap (https://www.reddit.com/r/bedrocklinux/comments/tcnu4n/bwrap_no_permissions_to_create_new_namespace/)for nesting, or else 
+	# Note: we need the bubblewrap-suid variant for nesting or else we get an
+	# error like this one
+	# (https://www.reddit.com/r/bedrocklinux/comments/tcnu4n/bwrap_no_permissions_to_create_new_namespace/)
 	# > Warning: could not find ghc-rebuild-doc-index.hook.
 	# > Preparing to handle cabal-install…
 	# > Building stage 1/2 cabal-install (dynamic-only flags).
@@ -237,36 +241,88 @@ package_ghc-cabal-arts() {
 	# >     Aborting...
 	# > nice -n 12 makepkg  14294.32s user 1151.88s system 502% cpu 51:13.13 total
 	#
-	# Finally, /usr/bin/cabal-install itself needs the ghc usr lib files.
-	# TODO: I backed up the orig 
-	#withShadowedDirs="/usr/bin/env LD_LIBRARY_PATH=$origGhcDir:$LD_LIBRARY_PATH /usr/bin/bwrap --dev-bind / / --bind /usr/lib/ghc-9.0.2 $origGhcDir --bind $emptyDir /usr/lib/ghc-9.0.2 --bind $pkgdir/usr/lib/ghc-9.4.2 /usr/lib/ghc-9.4.2"  # Can't find stm 2 5 0 0 so.
-	#for file in $(find /usr/lib/ghc-9.0.2); do
-	for file in $(find /usr/lib/ghc-9.0.2 -iname '*.so*'); do
+	# This may be used in eval-fashion.
+	origGhcVersion="9.0.2"  # Default original (stage 0) GHC version.
+	origGhcVersion="$(/usr/bin/ghc --version | sed -nEe 's/^.*[[:space:]]+([^[:space:]]*$)/\1/g; p')"  # Get the last word from ‘ghc --version’, which is its version, e.g. ‘9.0.2’.
+	if ! [[ -e "/usr/lib/ghc-${origGhcVersion}" ]]; then
+		echo "ERROR: package_ghc-cabal-arts(): failed to find a valid \$origGhcVersion such that /usr/lib/ghc-\$origGhcVersion exists: could not find ‘/usr/lib/ghc-$origGhcVersion’." 1>&2
+		false
+	fi
+	for file in $(find "/usr/lib/ghc-${origGhcVersion}" -iname '*.so*'); do
 		# for cabal-install
 		cp -a -- "$file" "$origGhcDir/"
 	done
 	# Note bwrap drops LD_LIBRARY_PATH from the environment it seems for some
 	# reason.
 	export LD_LIBRARY_PATH="$origGhcDir:$LD_LIBRARY_PATH"
-	withShadowedDirs="/usr/bin/env LD_LIBRARY_PATH=$origGhcDir:\$LD_LIBRARY_PATH:$LD_LIBRARY_PATH /usr/bin/bwrap --dev-bind / / --bind $emptyDir /usr/lib/ghc-9.0.2 --bind $pkgdir/usr/lib/ghc-9.4.2 /usr/lib/ghc-9.4.2 /usr/bin/env LD_LIBRARY_PATH=$origGhcDir:\$LD_LIBRARY_PATH:$LD_LIBRARY_PATH "
-#echo DEBUG100 	PATH="$tmpPath" HOME="$cabalAbsDir" $withShadowedDirs /usr/bin/cabal -v --store-dir="$tmpStoreDir" --enable-shared --enable-executable-dynamic --disable-library-vanilla \
-#		--ghc-pkg-option="--global-package-db=$pkgdir/usr/lib/ghc-9.4.2/package.conf.d" \
-#		$ghcOptionsDbs \
-#		v2-update --project-file="$cabalAbsDir/cabal.project.release" \
-#		-O --prefix="$tmpStoreDir" --docdir="$tmpStoreDir/share/doc/cabal-install" --datasubdir="cabal-install" \
-#		--dynlibdir="$tmpStoreDir/lib" --libsubdir="compiler/site-local/\$pkgid" \
-#		1>&2
-#echo DEBUG102----- 1>&2
-#PATH="$tmpPath" HOME="$cabalAbsDir" $withShadowedDirs /usr/bin/pwd
-#echo DEBUG104----- 1>&2
-#PATH="$tmpPath" HOME="$cabalAbsDir" $withShadowedDirs /usr/bin/env
-#echo DEBUG105----- 1>&2
-#PATH="$tmpPath" HOME="$cabalAbsDir" $withShadowedDirs /usr/bin/ldd /usr/bin/cabal
-#echo DEBUG106----- 1>&2
-#PATH="$tmpPath" HOME="$cabalAbsDir" $withShadowedDirs /usr/bin/echo $origGhcDir
-#echo DEBUG107----- 1>&2
-#PATH="$tmpPath" HOME="$cabalAbsDir" $withShadowedDirs /usr/bin/ls $origGhcDir
-#echo DEBUG108----- 1>&2
+	withShadowedDirs=""
+	if [[ "$origGhcVersion" != "9.4.2" ]]; then
+		withShadowedDirs="/usr/bin/env LD_LIBRARY_PATH=$origGhcDir:\$LD_LIBRARY_PATH:$LD_LIBRARY_PATH /usr/bin/bwrap --dev-bind / / --bind $emptyDir /usr/lib/ghc-$origGhcVersion --bind $pkgdir/usr/lib/ghc-9.4.2 /usr/lib/ghc-9.4.2 /usr/bin/env LD_LIBRARY_PATH=$origGhcDir:\$LD_LIBRARY_PATH:$LD_LIBRARY_PATH "
+	else
+		withShadowedDirs="/usr/bin/env LD_LIBRARY_PATH=$origGhcDir:\$LD_LIBRARY_PATH:$LD_LIBRARY_PATH /usr/bin/bwrap --dev-bind / /                                               --bind $pkgdir/usr/lib/ghc-9.4.2 /usr/lib/ghc-9.4.2 /usr/bin/env LD_LIBRARY_PATH=$origGhcDir:\$LD_LIBRARY_PATH:$LD_LIBRARY_PATH "
+	fi
+
+	# That *almost* does it, except for one little problem:
+	# > % /usr/bin/bwrap --dev-bind / / --bind …/emptydir /usr/lib/ghc-9.0.2 --bind …/dirwithstuff /usr/lib/ghc-9.4.2 bash
+	# > bwrap: Can't mkdir /usr/lib/ghc-9.4.2: Permission denied
+
+	# fakeroot and bwrap by themselves seem inadequate to provide a simple
+	# solution, so we'll have to handle this ourselves.  It's a little
+	# inefficient, but we'll just create our own temp …/usr/lib directory that
+	# is a clone of the native /usr/lib dir except with a new directory,
+	# /usr/lib/ghc-9.4.2.
+	if [[ -e "/usr/lib/ghc-9.4.2" ]]; then
+		# Nothing to do.
+		#
+		# (You can also just ‘sudo mkdir /usr/lib/ghc-9.4.2’ to creat an empty
+		# directory to get to this point.)
+		:
+	else
+		# fakeroot and bwrap can fake making a directory empty but not easily
+		# making a new directory, without extra work such as we do here.
+		#
+		# If we don't do this extra step, bwrap will fail because it can't
+		# create ‘/usr/lib/ghc-9.4.2’.
+		echo "		(Note: /usr/lib/ghc-9.4.2 doesn't exist; setting up a temporary patched ‘…/usr/lib’ dir…)"
+		echo "		(Note: 	(Alternatively, you may also run ‘sudo mkdir /usr/lib/ghc-9.4.2’ to temporarily create this empty dir to skip this step.))"
+		patchedUsrLibDir="$(pwd)/patchedUsrLib"
+		install -d -m 0775 -- "$patchedUsrLibDir"
+		# We could just copy everything up over but /usr/lib can be big.  On my
+		# system it's 11GiB or so.
+		#
+		# So to save on space requirements, we'll only copy all the top-level
+		# *files* (non-directories), and then create empty directories to
+		# bind-mount (--bind) the subtrees, so that now we have only (maybe
+		# 3GiB?) of copying.
+		binds=""
+		for file in /usr/lib/*; do
+			if [[ ! -d "$file" ]]; then
+				cp -a -- "$file" "$patchedUsrLibDir/"
+			else
+				base="$(basename -- "$file")"
+				install -d -m 0775 -- "$patchedUsrLibDir/$base"
+				binds+=" --bind /usr/lib/$base $patchedUsrLibDir/$base"
+			fi
+		done
+
+		# Prepend withShadowedDirs to use our patched to-be /usr/lib directory.
+		patchLibLayer="--bind $patchedUsrLibDir /usr/lib"
+		withShadowedDirs="/usr/bin/env LD_LIBRARY_PATH=$origGhcDir:\$LD_LIBRARY_PATH:$LD_LIBRARY_PATH /usr/bin/bwrap --dev-bind / / $patchLibLayer $withShadowedDirs"
+		bindLayer="$binds"
+		withShadowedDirs="/usr/bin/env LD_LIBRARY_PATH=$origGhcDir:\$LD_LIBRARY_PATH:$LD_LIBRARY_PATH /usr/bin/bwrap --dev-bind / / $bindLayer $withShadowedDirs"
+		# Now instead of 1 bwrap layer, we have 3 to get the FS we need.
+	fi
+
+	# Finally for this stage, just run a couple bwrapped commands as basically
+	# no-ops to try to detect a possible failure (e.g. if we hit shell argument
+	# limits) so that we can try to help the user in this case, e.g. by doing
+	# the ‘sudo mkdir /usr/lib/ghc-9.4.2’ temporary directory hack.
+	$withShadowedDirs true && $withShadowedDirs true arg0 arg1 arg2 arg3 arg4 arg5 arg6 arg7 || {
+		code="$?"
+		echo "ERROR: package_ghc-cabal-arts(): failed to use ‘\$withShadowedDirs’ to patch native build dirs (code $?)." 1>&2
+		echo "	Consider running ‘sudo mkdir /usr/lib/ghc-9.4.2’ to create a temporary empty directory for this build as a workaround and trying again." 1>&2
+		false
+	}
 
 	# Bootstrap cabal-install.
 
@@ -281,10 +337,10 @@ package_ghc-cabal-arts() {
 	# Check paths for characters we currently can't handle.
 	if [[ -n "$(sed -nEe "/[^[:alnum:][:punct:]]/p" <<< "$(pwd)")" ]]; then
 		printf '%s\n' "Error: package_ghc-cabal-arts():" 1>&2
-		printf '%s\n' "\tThe current path has spaces or other invalid characters, and this" 1>&2
-		printf '%s\n' "\tPKGBUILD currently does not have adequately sophisticated quoting" 1>&2
-		printf '%s\n' "\tto handle this at the momnet.  Consider disabling this check if" 1>&2
-		printf '%s\n' "\tyou know what you are doing or else volunteering a fix." 1>&2
+		printf '%s\n' "	The current path has spaces or other invalid characters, and this" 1>&2
+		printf '%s\n' "	PKGBUILD currently does not have adequately sophisticated quoting" 1>&2
+		printf '%s\n' "	to handle this at the momnet.  Consider disabling this check if" 1>&2
+		printf '%s\n' "	you know what you are doing or else volunteering a fix." 1>&2
 		false
 	fi
 
@@ -301,8 +357,6 @@ package_ghc-cabal-arts() {
 	origPath="$PATH"
 	cabalAbsDir="$(pwd)"
 	tmpBin="$cabalAbsDir/tmp-bin"
-	#tmpPath="$tmpBin:$origPath"
-	#tmpPath="$tmpBin"
 	tmpPath="$tmpBin:$origPath"
 
 	# Try to trick cabal-install into not default to host user stores; avoid
@@ -316,15 +370,11 @@ package_ghc-cabal-arts() {
 	# It's backwards.  That is, when I looked at the ghc command called, the
 	# arguments were in reverse order for some reason.  Okay, so I'll just
 	# reverse the order of the arguments here.
-	# TODO: Uncomment; trying without -clear-package-db.
-#	#ghcOptionsDbs="--ghc-option=-ghcversion-file=$pkgdir/usr/lib/ghc-9.4.2/rts/include/ghcversion.h --ghc-option=-clear-package-db --ghc-option=-no-global-package-db --ghc-option=-package-db --ghc-option=$pkgdir/usr/lib/ghc-9.4.2/package.conf.d --ghc-option=-user-package-db --ghc-option=-package-db --ghc-option=dist/package.conf.inplace --ghc-option=-package-db --ghc-option=$cabalAbsDir/tmp-store/ghc-9.4.2/package.db --ghc-option=-v --extra-lib-dirs=/usr/lib --extra-include-dirs=/usr/include"
-#	ghcOptionsDbs="--extra-include-dirs=/usr/include --extra-lib-dirs=/usr/lib --ghc-option=-v --ghc-option=$cabalAbsDir/tmp-store/ghc-9.4.2/package.db --ghc-option=-package-db --ghc-option=dist/package.conf.inplace --ghc-option=-package-db --ghc-option=-user-package-db --ghc-option=$pkgdir/usr/lib/ghc-9.4.2/package.conf.d --ghc-option=-package-db --ghc-option=-no-global-package-db --ghc-option=-clear-package-db --ghc-option=-ghcversion-file=$pkgdir/usr/lib/ghc-9.4.2/rts/include/ghcversion.h"
-
 	#ghcOptionsDbs="--ghc-option=-ghcversion-file=$pkgdir/usr/lib/ghc-9.4.2/rts/include/ghcversion.h --ghc-option=-no-global-package-db --ghc-option=-package-db --ghc-option=$pkgdir/usr/lib/ghc-9.4.2/package.conf.d --ghc-option=-user-package-db --ghc-option=-package-db --ghc-option=$cabalAbsDir/tmp-store/ghc-9.4.2/package.db --ghc-option=-v --extra-lib-dirs=/usr/lib --extra-include-dirs=/usr/include"
 	ghcOptionsDbs="--extra-include-dirs=/usr/include --extra-lib-dirs=/usr/lib --ghc-option=-v --ghc-option=$cabalAbsDir/tmp-store/ghc-9.4.2/package.db --ghc-option=-package-db --ghc-option=-user-package-db --ghc-option=$pkgdir/usr/lib/ghc-9.4.2/package.conf.d --ghc-option=-package-db --ghc-option=-no-global-package-db --ghc-option=-ghcversion-file=$pkgdir/usr/lib/ghc-9.4.2/rts/include/ghcversion.h"
 
 	# Build stage-1 cabal-install.
-echo "DEBUG89----------------------------------------------------" 1>&2
+	echo "	(Updating index…)"
 	PATH="$tmpPath" HOME="$cabalAbsDir" $withShadowedDirs /usr/bin/cabal -v --store-dir="$tmpStoreDir" --enable-shared --enable-executable-dynamic --disable-library-vanilla \
 		--ghc-pkg-option="--global-package-db=$pkgdir/usr/lib/ghc-9.4.2/package.conf.d" \
 		$ghcOptionsDbs \
@@ -333,7 +383,7 @@ echo "DEBUG89----------------------------------------------------" 1>&2
 		--dynlibdir="$tmpStoreDir/lib" --libsubdir="compiler/site-local/\$pkgid" \
 		#
 
-echo "DEBUG90----------------------------------------------------" 1>&2
+	echo "	(Stage 1/2, configuring 1/2…)"
 	# Run configure twice, once to generate a default $cabalAbsDir/.cabal/config, so we can enable default dynamic flags.
 	PATH="$tmpPath" HOME="$cabalAbsDir" $withShadowedDirs /usr/bin/cabal -v --store-dir="$tmpStoreDir" --enable-shared --enable-executable-dynamic --disable-library-vanilla \
 		--ghc-pkg-option="--global-package-db=$pkgdir/usr/lib/ghc-9.4.2/package.conf.d" \
@@ -343,7 +393,7 @@ echo "DEBUG90----------------------------------------------------" 1>&2
 		--dynlibdir="$tmpStoreDir/lib" --libsubdir="compiler/site-local/\$pkgid" \
 		#
 
-echo "DEBUG90.1----------------------------------------------------" 1>&2
+	echo "	(Setting up additional configuration…)"
 	# Patch the user-level cabal config to temporarily set dynamic-only
 	# settings just to build phase 1 cabal-install.  Phase 1 cabal-install can
 	# handle differences in static vs dynamic files better, so after phase 1
@@ -366,7 +416,7 @@ echo "DEBUG90.1----------------------------------------------------" 1>&2
 		sed -nEe '/^(-- *)?package-db: *$/s@@package-db: '"$pkgdirEscaped"'/usr/lib/ghc-9.4.2/package.conf.d\nghc-pkg-option: --global-package-db='"$pkgdirEscaped"'/usr/lib/ghc-9.4.2/package.conf.d\nghc-option: -ghcversion-file='"$pkgdirEscaped"'/usr/lib/ghc-9.4.2/rts/include/ghcversion.h\nghc-option: -clear-package-db\nghc-option: -no-global-package-db\nghc-option: -package-db '"$pkgdirEscaped"'/usr/lib/ghc-9.4.2/package.conf.d\nghc-option: -user-package-db\nghc-option: -package-db dist/package.conf.inplace\nghc-option: -v@g; p' -i "$cabalAbsDir/.cabal/config"
 	fi
 
-echo "DEBUG90.2----------------------------------------------------" 1>&2
+	echo "	(Stage 1/2, configuring 2/2…)"
 	PATH="$tmpPath" HOME="$cabalAbsDir" $withShadowedDirs /usr/bin/cabal -v --store-dir="$tmpStoreDir" --enable-shared --enable-executable-dynamic --disable-library-vanilla \
 		--ghc-pkg-option="--global-package-db=$pkgdir/usr/lib/ghc-9.4.2/package.conf.d" \
 		$ghcOptionsDbs \
@@ -375,27 +425,26 @@ echo "DEBUG90.2----------------------------------------------------" 1>&2
 		--dynlibdir="$tmpStoreDir/lib" --libsubdir="compiler/site-local/\$pkgid" \
 		#
 
-echo "DEBUG91----------------------------------------------------" 1>&2
+	echo "	(Stage 1/2, building…)"
 	PATH="$tmpPath" HOME="$cabalAbsDir" $withShadowedDirs /usr/bin/cabal -v --store-dir="$tmpStoreDir" --enable-shared --enable-executable-dynamic --disable-library-vanilla \
 		--ghc-pkg-option="--global-package-db=$pkgdir/usr/lib/ghc-9.4.2/package.conf.d" \
 		$ghcOptionsDbs \
 		v2-build --project-file="$cabalAbsDir/cabal.project.release" cabal-install \
 		#
 
-echo "DEBUG92----------------------------------------------------" 1>&2
+	echo "	(Stage 1/2, installing…)"
 	PATH="$tmpPath" HOME="$cabalAbsDir" $withShadowedDirs /usr/bin/cabal -v --store-dir="$tmpStoreDir" --enable-shared --enable-executable-dynamic --disable-library-vanilla \
 		--ghc-pkg-option="--global-package-db=$pkgdir/usr/lib/ghc-9.4.2/package.conf.d" \
 		$ghcOptionsDbs \
 		v2-install --project-file="$cabalAbsDir/cabal.project.release" cabal-install --overwrite-policy=always \
 		--prefix="$tmpStoreDir" --installdir="$tmpBin" \
 		#
-echo "DEBUG93----------------------------------------------------" 1>&2
 
 	# Reset config.
+	echo "	(Resetting configuration for stage 2/2…)"
 	sed -nEe '/^(-- *)?library-vanilla: (False|True|)$/s//--library-vanilla: True/g; p' -i "$cabalAbsDir/.cabal/config"
 	sed -nEe '/^(-- *)?shared: (|True|False)$/s//--shared: False/g; p' -i "$cabalAbsDir/.cabal/config"
 	sed -nEe '/^(-- *)?executable-dynamic: (True|False|)$/s//--executable-dynamic: True/g; p' -i "$cabalAbsDir/.cabal/config"
-echo "DEBUG94----------------------------------------------------" 1>&2
 
 	cd -- ".."
 
@@ -407,10 +456,8 @@ echo "DEBUG94----------------------------------------------------" 1>&2
 	install -d -m 0775 -- "./tmp-store"
 	tmpStoreDir="./tmp-store"
 
-	# TODO: need to reset the user store packages 'cause dynamic only now?
-
 	# Let hosttools cabal know of Hackage packages.
-echo "DEBUG70----------------------------------------------------" 1>&2
+	echo "	(Updating index…)"
 	PATH="$tmpPath" HOME="$cabalAbsDir" $withShadowedDirs cabal -v --store-dir="$pkgdir/usr/lib" --ghc-pkg-option="--global-package-db=$pkgdir/usr/lib/ghc-9.4.2/package.conf.d" \
 		$ghcOptionsDbs \
 		v2-update --project-file="$cabalAbsDir/cabal.project.release" \
@@ -419,34 +466,32 @@ echo "DEBUG70----------------------------------------------------" 1>&2
 		#
 
 	# Configure like haskell-scientific's PKGBUILD.
-echo "DEBUG0----------------------------------------------------" 1>&2
+	echo "	(Configuring…)"
 	PATH="$tmpPath" HOME="$cabalAbsDir" $withShadowedDirs cabal -v --store-dir="$pkgdir/usr/lib" --ghc-pkg-option="--global-package-db=$pkgdir/usr/lib/ghc-9.4.2/package.conf.d" \
 		$ghcOptionsDbs \
 		v2-configure --project-file="$cabalAbsDir/cabal.project.release" cabal-install \
 		-O --prefix="$pkgdir/usr" --docdir="$pkgdir/usr/share/doc/cabal-install" --datasubdir="cabal-install" \
 		--dynlibdir="$pkgdir/usr/lib" --libsubdir="compiler/site-local/\$pkgid" \
 		#
-echo "DEBUG2----------------------------------------------------" 1>&2
+	echo "	(Building…)"
 	PATH="$tmpPath" HOME="$cabalAbsDir" $withShadowedDirs cabal -v --store-dir="$pkgdir/usr/lib" --ghc-pkg-option="--global-package-db=$pkgdir/usr/lib/ghc-9.4.2/package.conf.d" \
 		$ghcOptionsDbs \
 		v2-build --project-file="$cabalAbsDir/cabal.project.release" cabal-install \
 		#
 
-echo "DEBUG3----------------------------------------------------" 1>&2
 	echo "Installing cabal-install…"
-echo "DEBUG4----------------------------------------------------" 1>&2
+	echo "	(Installing…)"
 	PATH="$tmpPath" HOME="$cabalAbsDir" $withShadowedDirs cabal -v --store-dir="$pkgdir/usr/lib" --ghc-pkg-option="--global-package-db=$pkgdir/usr/lib/ghc-9.4.2/package.conf.d" \
 		$ghcOptionsDbs \
 		v2-install --project-file="$cabalAbsDir/cabal.project.release" cabal-install --overwrite-policy=always \
 		--prefix="$pkgdir/usr" --installdir="$pkgdir/usr/bin" \
 		#
-echo "DEBUG5----------------------------------------------------" 1>&2
+	echo "	(Installing (lib)…)"
 	PATH="$tmpPath" HOME="$cabalAbsDir" $withShadowedDirs cabal -v --store-dir="$pkgdir/usr/lib" --ghc-pkg-option="--global-package-db=$pkgdir/usr/lib/ghc-9.4.2/package.conf.d" \
 		$ghcOptionsDbs \
 		v2-install --project-file="$cabalAbsDir/cabal.project.release" cabal-install --lib --overwrite-policy=always \
 		--prefix="$pkgdir/usr" \
 		#
-echo "DEBUG6----------------------------------------------------" 1>&2
 
 	# Optional: also install cabal-tests.
 	#
@@ -474,41 +519,6 @@ echo "DEBUG6----------------------------------------------------" 1>&2
 		|| {
 		echo "Warning: failed to build and install cabal-tests ($?)." 1>&2
 	}
-
-#	# Configure like haskell-scientific's PKGBUILD.
-#echo "DEBUG0----------------------------------------------------" 1>&2
-#	cabal -v v2-configure --project-file=cabal.project.release cabal-install \
-#		-O --prefix=/usr --docdir=/usr/share/doc/"cabal-install" --datasubdir="cabal-install" \
-#		--dynlibdir=/usr/lib --libsubdir='compiler/site-local/$pkgid' \
-#		#
-#echo "DEBUG1----------------------------------------------------" 1>&2
-#	cabal -v v2-build --project-file=cabal.project.release cabal-install
-#echo "DEBUG2----------------------------------------------------" 1>&2
-#
-#	cabal -v v2-configure --project-file=cabal.project.validate cabal-testsuite:cabal-tests \
-#		-O --prefix=/usr --docdir=/usr/share/doc/"cabal-install" --datasubdir="cabal-install" \
-#		--dynlibdir=/usr/lib --libsubdir='compiler/site-local/$pkgid' \
-#		#
-#echo "DEBUG3----------------------------------------------------" 1>&2
-#	cabal -v v2-build --project-file=cabal.project.validate cabal-testsuite:cabal-tests
-#echo "DEBUG4----------------------------------------------------" 1>&2
-#
-#	echo "Installing cabal-install…"
-#
-#	#cabal -v v2-install --project-file=cabal.project.release cabal-install --prefix=/usr --overwrite-policy=always
-#	#cabal -v v2-install --project-file=cabal.project.release cabal-install --prefix=/usr --lib --overwrite-policy=always
-#	#
-#	#cabal -v v2-install --project-file=cabal.project.validate cabal-testsuite:cabal-tests --prefix=/usr --overwrite-policy=always ||  {
-#	#	echo "Warning: could not install (outside pkgdir) cabal-testsuite:cabal-tests." 1>&2
-#	#}
-#
-#	# "$pkgdir"
-#	cabal -v --store-dir="$pkgdir/usr/lib" v2-install --project-file=cabal.project.release cabal-install --prefix="$pkgdir/usr" --installdir="$pkgdir/usr/bin" --overwrite-policy=always
-#	cabal -v --store-dir="$pkgdir/usr/lib" v2-install --project-file=cabal.project.release cabal-install --prefix="$pkgdir/usr" --lib --overwrite-policy=always
-#
-#	cabal -v --store-dir="$pkgdir/usr/lib" v2-install --project-file=cabal.project.validate cabal-testsuite:cabal-tests --prefix="$pkgdir/usr" --installdir="$pkgdir/usr/bin" --overwrite-policy=always || {
-#		echo "Warning: could not install cabal-testsuite:cabal-tests (with pkgdir)." 1>&2
-#	}
 
 	echo "Installing Cabal misc files…"
 	# From upstream cabal-install PKGBUILD.
