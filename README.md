@@ -95,3 +95,42 @@ Install ghc into e.g. ~/local/ghc-9.4.2-arts by recursively cloning ghc, checkin
 
 Then install cabal-install similarly, with Cabal's {{ic|*/*.cabal}} dependencies updated so that base is updated (e.g. for ghc-9.4.2, ‘< 4.18’) and setup-depends Cabal* dependencies are updated for e.g. 3.9.* rather than 3.6.
 ```
+
+# Notes
+
+This package includes a patched cabal-install (track dynamic vs static build
+artifacts and dependencies) and GHC (essentially just so that ghc-pkg
+recognizes new fields in e.g.  `/usr/lib/ghc-9.4.2/package.conf.d/*.conf`, that
+is, InstalledPackageInfo files).
+
+There are a few related TODO notes in the cabal-install source, such as `
+--TODO: [required feature]: also needs to be handled recursively` for
+`elabVanillaLib` in `ProjectPlanning.hs`.
+
+The InstalledPackageInfo record corresponds to these `*.conf` files and are
+part of package DBs.  They track information about installed packages.
+
+Without this patchset, these records lack information about what kinds of build
+artifacts are present or missing in the installed package, in particular
+dynamic and static files.
+
+With this patchset, cabal-install and ghc have an extended InstalledPackageInfo
+record with 5 new fields.  The other major component is that cabal-install's
+dependency solver becomes aware of build artifact requirements between
+packages, so that it knows when it should prefer building a package from source
+rather than choosing a pre-installed package if it lacks required build
+artifacts.  (It also fixes an issue with cabal-install where flags to adjust
+dynamic vs static building were ignored, as a dependency fix.)
+
+## Fixed Haskell installation on Archlinux
+
+One way to fix the problem that ‘ghc’ and ‘cabal-install’ on Archlinux as of
+2022-09-17 being broken without further configuration has two pieces:
+1) This patchset, so that cabal-install has better awareness of static and
+dynamic files, and
+2) An option of base system (with GHC and cabal-install) packages that provide
+all types of build artifacts, in particular static and dynamic; this is not as
+essential for additional Haskell packages beyond the base, foundational
+packages that others can depend on.
+
+This package provides both pieces in one package.
